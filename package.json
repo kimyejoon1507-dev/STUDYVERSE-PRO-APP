@@ -1,0 +1,43 @@
+{
+  "name": "studyverse-pro",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c cyan,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "tsx watch server/index.ts",
+    "dev:web": "vite --host 0.0.0.0",
+    "build": "tsc -b && tsc --noEmit -p tsconfig.server.json && vite build",
+    "start": "tsx server/index.ts",
+    "typecheck": "tsc -b --pretty && tsc --noEmit -p tsconfig.server.json"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "bcryptjs": "^3.0.2",
+    "cookie": "^1.0.2",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "sql.js": "^1.13.0",
+    "tsx": "^4.20.5",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie": "^0.6.0",
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@types/sql.js": "^1.4.11",
+    "concurrently": "^9.2.1",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.5"
+  }
+}
