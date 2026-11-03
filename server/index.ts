@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
 import cookie from 'cookie';
 import express, { type NextFunction, type Request, type Response } from 'express';
+import { OAuth2Client } from 'google-auth-library';
 import jwt from 'jsonwebtoken';
 import initSqlJs, { type Database } from 'sql.js';
 import { Server } from 'socket.io';
@@ -16,6 +17,12 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const port = Number(process.env.PORT ?? 3001);
 const jwtSecret = process.env.JWT_SECRET;
+const googleClientId = process.env.GOOGLE_CLIENT_ID;
+const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+const googleRedirectUri = process.env.GOOGLE_REDIRECT_URI;
+const googleOAuthClient = googleClientId && googleClientSecret && googleRedirectUri
+  ? new OAuth2Client(googleClientId, googleClientSecret, googleRedirectUri)
+  : null;
 if (!jwtSecret || jwtSecret.length < 32 || jwtSecret.startsWith('replace-this')) {
   throw new Error('JWT_SECRET must be set in .env to a random secret of at least 32 characters.');
 }
@@ -32,7 +39,7 @@ db.run(`
     id TEXT PRIMARY KEY, user_id TEXT UNIQUE NOT NULL, email TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL, nickname TEXT NOT NULL, avatar TEXT NOT NULL DEFAULT '',
     coins INTEGER NOT NULL DEFAULT 100, xp INTEGER NOT NULL DEFAULT 0,
-    level INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+    level INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, google_sub TEXT
   );
   CREATE TABLE IF NOT EXISTS friend_requests (
     id TEXT PRIMARY KEY, sender_id TEXT NOT NULL REFERENCES users(id),
@@ -136,6 +143,13 @@ function transaction<T>(action: () => T): T {
     throw error;
   }
 }
+if (!rows<{ name: string }>('PRAGMA table_info(users)').some(column => column.name === 'google_sub')) {
+  db.run('ALTER TABLE users ADD COLUMN google_sub TEXT');
+  db.run('CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique ON users(google_sub) WHERE google_sub IS NOT NULL');
+  persist();
+} else {
+  db.run('CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique ON users(google_sub) WHERE google_sub IS NOT NULL');
+}
 function now() {
   return new Date().toISOString();
 }
@@ -164,6 +178,23 @@ const cookieOptions = {
   httpOnly: true, sameSite: 'lax' as const, secure: process.env.NODE_ENV === 'production',
   path: '/', maxAge: 7 * 24 * 60 * 60 * 1000
 };
+const googleStateCookieOptions = {
+  httpOnly: true, sameSite: 'lax' as const, secure: process.env.NODE_ENV === 'production',
+  path: '/api/auth/google/callback', maxAge: 10 * 60 * 1000
+};
+function clearGoogleOAuthCookies(res: Response) {
+  res.clearCookie('google_oauth_state', googleStateCookieOptions);
+  res.clearCookie('google_oauth_nonce', googleStateCookieOptions);
+}
+function matchesOAuthValue(actual: string | undefined, expected: string | undefined) {
+  if (!actual || !expected) return false;
+  const actualBytes = Buffer.from(actual);
+  const expectedBytes = Buffer.from(expected);
+  return actualBytes.length === expectedBytes.length && crypto.timingSafeEqual(actualBytes, expectedBytes);
+}
+function googleAuthRedirect(res: Response, error: string) {
+  return res.redirect(`/?authError=${encodeURIComponent(error)}`);
+}
 function issueCookie(res: Response, userId: string) {
   const token = jwt.sign({ sub: userId }, jwtSecret!, { expiresIn: '7d' });
   res.cookie('studyverse_session', token, cookieOptions);
@@ -247,6 +278,85 @@ function addXp(userId: string, amount: number) {
 }
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, storage: 'sqlite' }));
+app.get('/api/auth/google', limitAuthAttempts, (_req, res) => {
+  if (!googleOAuthClient) return googleAuthRedirect(res, 'google_not_configured');
+  const state = crypto.randomBytes(32).toString('base64url');
+  const nonce = crypto.randomBytes(32).toString('base64url');
+  res.cookie('google_oauth_state', state, googleStateCookieOptions);
+  res.cookie('google_oauth_nonce', nonce, googleStateCookieOptions);
+  const authorizationUrl = googleOAuthClient.generateAuthUrl({
+    response_type: 'code',
+    scope: ['openid', 'email', 'profile'],
+    state,
+    nonce,
+    prompt: 'select_account'
+  });
+  return res.redirect(authorizationUrl);
+});
+app.get('/api/auth/google/callback', limitAuthAttempts, async (req: SessionRequest, res) => {
+  const stateCookie = req.cookies?.google_oauth_state;
+  const nonceCookie = req.cookies?.google_oauth_nonce;
+  clearGoogleOAuthCookies(res);
+  if (!googleOAuthClient || !googleClientId || !googleRedirectUri) return googleAuthRedirect(res, 'google_not_configured');
+  if (typeof req.query.error === 'string') return googleAuthRedirect(res, 'google_cancelled');
+  const state = typeof req.query.state === 'string' ? req.query.state : undefined;
+  const code = typeof req.query.code === 'string' ? req.query.code : undefined;
+  if (!matchesOAuthValue(state, stateCookie) || !nonceCookie || !code) return googleAuthRedirect(res, 'google_invalid_state');
+
+  try {
+    const { tokens } = await googleOAuthClient.getToken({ code, redirect_uri: googleRedirectUri });
+    if (!tokens.id_token) return googleAuthRedirect(res, 'google_failed');
+    const ticket = await googleOAuthClient.verifyIdToken({ idToken: tokens.id_token, audience: googleClientId });
+    const profile = ticket.getPayload();
+    if (!profile?.sub || !profile.email || profile.email_verified !== true ||
+        !matchesOAuthValue(profile.nonce, nonceCookie)) return googleAuthRedirect(res, 'google_invalid_identity');
+
+    const email = profile.email.trim().toLowerCase();
+    const googleSub = profile.sub;
+    const displayName = Array.from(profile.name?.trim() ?? '').slice(0, 24).join('') || 'Google 탐험가';
+    const picture = profile.picture && new URL(profile.picture).protocol === 'https:' ? profile.picture : '';
+    let user: { id: string; google_sub: string | null } | null =
+      row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE google_sub = ?', [googleSub]) ?? null;
+
+    if (!user) {
+      const emailUser = row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE lower(email) = ?', [email]);
+      if (!emailUser) {
+        const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('base64url'), 12);
+        user = transaction(() => {
+          const byGoogle = row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE google_sub = ?', [googleSub]);
+          if (byGoogle) return byGoogle;
+          const byEmail = row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE lower(email) = ?', [email]);
+          if (byEmail) {
+            if (byEmail.google_sub && byEmail.google_sub !== googleSub) return null;
+            run('UPDATE users SET google_sub = ?, avatar = CASE WHEN avatar = \'\' THEN ? ELSE avatar END WHERE id = ?', [googleSub, picture, byEmail.id]);
+            return row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE id = ?', [byEmail.id])!;
+          }
+          let userId: string;
+          do { userId = `SV${crypto.randomInt(10000000, 100000000)}`; }
+          while (row('SELECT 1 FROM users WHERE user_id = ?', [userId]));
+          const id = createId();
+          run('INSERT INTO users (id, user_id, email, password_hash, nickname, avatar, created_at, google_sub) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [id, userId, email, passwordHash, displayName, picture, now(), googleSub]);
+          return row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE id = ?', [id])!;
+        });
+      } else if (emailUser.google_sub && emailUser.google_sub !== googleSub) {
+        return googleAuthRedirect(res, 'google_account_conflict');
+      } else {
+        run('UPDATE users SET google_sub = ?, avatar = CASE WHEN avatar = \'\' THEN ? ELSE avatar END WHERE id = ? AND (google_sub IS NULL OR google_sub = ?)',
+          [googleSub, picture, emailUser.id, googleSub]);
+        user = row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE id = ?', [emailUser.id]) ?? null;
+      }
+    }
+
+    if (!user || user.google_sub !== googleSub) return googleAuthRedirect(res, 'google_account_conflict');
+    persist();
+    issueCookie(res, user.id);
+    return res.redirect('/');
+  } catch (error) {
+    console.error('Google OAuth callback failed:', error instanceof Error ? error.message : 'Unknown error');
+    return googleAuthRedirect(res, 'google_failed');
+  }
+});
 app.post('/api/auth/register', limitAuthAttempts, async (req, res) => {
   const parsed = registrationSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: '이메일, 닉네임 또는 비밀번호를 확인해 주세요.' });

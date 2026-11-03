@@ -80,7 +80,22 @@ function PlanList({ plans, onToggle, emptyText }: { plans: StudyPlan[]; onToggle
 
 function AuthScreen({ onLogin }: { onLogin: (user: User) => void }) {
   const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(() => {
+    const url = new URL(window.location.href);
+    const code = url.searchParams.get('authError');
+    if (!code) return '';
+    const messages: Record<string, string> = {
+      google_not_configured: 'Google 로그인이 아직 설정되지 않았습니다. 서버 환경변수를 확인해 주세요.',
+      google_cancelled: 'Google 로그인이 취소되었습니다.',
+      google_invalid_state: 'Google 인증 요청을 확인할 수 없습니다. 다시 시도해 주세요.',
+      google_invalid_identity: 'Google 계정을 확인하지 못했습니다. 이메일 인증 상태를 확인해 주세요.',
+      google_account_conflict: '이 이메일은 다른 Google 계정에 연결되어 있습니다. 이메일 로그인을 이용해 주세요.',
+      google_failed: 'Google 로그인에 실패했습니다. 잠시 후 다시 시도해 주세요.'
+    };
+    url.searchParams.delete('authError');
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+    return messages[code] ?? 'Google 로그인에 실패했습니다. 다시 시도해 주세요.';
+  });
   const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -108,6 +123,12 @@ function AuthScreen({ onLogin }: { onLogin: (user: User) => void }) {
         {error && <p className="form-error">{error}</p>}
         <button className="primary-button wide" disabled={busy}>{busy ? '잠시만요…' : mode === 'login' ? '로그인' : '무료 계정 만들기'}<ArrowRight size={17} /></button>
       </form>
+      {mode === 'login' && <>
+        <div className="auth-divider"><span>또는</span></div>
+        <button className="google-login-button" type="button" disabled={busy} onClick={() => window.location.assign('/api/auth/google')}>
+          <span className="google-mark" aria-hidden="true">G</span>Google로 로그인
+        </button>
+      </>}
       <p className="auth-switch">{mode === 'login' ? '처음 오셨나요?' : '이미 계정이 있나요?'} <button onClick={() => { setError(''); setMode(mode === 'login' ? 'register' : 'login'); }}>{mode === 'login' ? '회원가입' : '로그인'}</button></p>
       <div className="auth-security"><Shield size={14} /> 비밀번호는 암호화되어 안전하게 저장됩니다.</div>
     </div>
