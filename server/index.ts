@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
 import cookie from 'cookie';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import { OAuth2Client } from 'google-auth-library';
 import jwt from 'jsonwebtoken';
 import initSqlJs, { type Database } from 'sql.js';
 import { Server } from 'socket.io';
@@ -17,12 +16,6 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const port = Number(process.env.PORT ?? 3001);
 const jwtSecret = process.env.JWT_SECRET;
-const googleClientId = process.env.GOOGLE_CLIENT_ID;
-const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
-const googleRedirectUri = process.env.GOOGLE_REDIRECT_URI;
-const googleOAuthClient = googleClientId && googleClientSecret && googleRedirectUri
-  ? new OAuth2Client(googleClientId, googleClientSecret, googleRedirectUri)
-  : null;
 if (!jwtSecret || jwtSecret.length < 32 || jwtSecret.startsWith('replace-this')) {
   throw new Error('JWT_SECRET must be set in .env to a random secret of at least 32 characters.');
 }
@@ -37,9 +30,10 @@ db.run('PRAGMA foreign_keys = ON');
 db.run(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY, user_id TEXT UNIQUE NOT NULL, email TEXT UNIQUE NOT NULL,
+    login_name TEXT,
     password_hash TEXT NOT NULL, nickname TEXT NOT NULL, avatar TEXT NOT NULL DEFAULT '',
     coins INTEGER NOT NULL DEFAULT 100, xp INTEGER NOT NULL DEFAULT 0,
-    level INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, google_sub TEXT
+    level INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS friend_requests (
     id TEXT PRIMARY KEY, sender_id TEXT NOT NULL REFERENCES users(id),
@@ -143,13 +137,24 @@ function transaction<T>(action: () => T): T {
     throw error;
   }
 }
-if (!rows<{ name: string }>('PRAGMA table_info(users)').some(column => column.name === 'google_sub')) {
-  db.run('ALTER TABLE users ADD COLUMN google_sub TEXT');
-  db.run('CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique ON users(google_sub) WHERE google_sub IS NOT NULL');
-  persist();
-} else {
-  db.run('CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique ON users(google_sub) WHERE google_sub IS NOT NULL');
+const userColumns = rows<{ name: string }>('PRAGMA table_info(users)');
+let authSchemaChanged = false;
+if (!userColumns.some(column => column.name === 'login_name')) {
+  db.run('ALTER TABLE users ADD COLUMN login_name TEXT');
+  authSchemaChanged = true;
 }
+if (!row('SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?', ['index', 'users_login_name_unique'])) {
+  db.run('CREATE UNIQUE INDEX users_login_name_unique ON users(lower(login_name)) WHERE login_name IS NOT NULL');
+  authSchemaChanged = true;
+}
+const legacyAccountFilter = userColumns.some(column => column.name === 'google_sub') ? 'google_sub IS NULL AND ' : '';
+db.run(`
+  UPDATE users SET login_name = trim(nickname)
+  WHERE login_name IS NULL AND length(trim(nickname)) BETWEEN 2 AND 24 AND ${legacyAccountFilter}
+    (SELECT COUNT(*) FROM users AS matching
+     WHERE lower(trim(matching.nickname)) = lower(trim(users.nickname))) = 1
+`);
+if (authSchemaChanged || db.getRowsModified() > 0) persist();
 function now() {
   return new Date().toISOString();
 }
@@ -159,9 +164,9 @@ function createId() {
 function routeParam(value: string | string[]) {
   return Array.isArray(value) ? value[0] ?? '' : value;
 }
-function userView(user: { id: string; user_id: string; email: string; nickname: string; avatar: string; coins: number; xp: number; level: number }) {
+function userView(user: { id: string; user_id: string; login_name: string | null; nickname: string; avatar: string; coins: number; xp: number; level: number }) {
   return {
-    id: user.id, userId: user.user_id, email: user.email, nickname: user.nickname,
+    id: user.id, userId: user.user_id, loginName: user.login_name ?? '', nickname: user.nickname,
     avatar: user.avatar, coins: user.coins, xp: user.xp, level: user.level
   };
 }
@@ -178,23 +183,6 @@ const cookieOptions = {
   httpOnly: true, sameSite: 'lax' as const, secure: process.env.NODE_ENV === 'production',
   path: '/', maxAge: 7 * 24 * 60 * 60 * 1000
 };
-const googleStateCookieOptions = {
-  httpOnly: true, sameSite: 'lax' as const, secure: process.env.NODE_ENV === 'production',
-  path: '/api/auth/google/callback', maxAge: 10 * 60 * 1000
-};
-function clearGoogleOAuthCookies(res: Response) {
-  res.clearCookie('google_oauth_state', googleStateCookieOptions);
-  res.clearCookie('google_oauth_nonce', googleStateCookieOptions);
-}
-function matchesOAuthValue(actual: string | undefined, expected: string | undefined) {
-  if (!actual || !expected) return false;
-  const actualBytes = Buffer.from(actual);
-  const expectedBytes = Buffer.from(expected);
-  return actualBytes.length === expectedBytes.length && crypto.timingSafeEqual(actualBytes, expectedBytes);
-}
-function googleAuthRedirect(res: Response, error: string) {
-  return res.redirect(`/?authError=${encodeURIComponent(error)}`);
-}
 function issueCookie(res: Response, userId: string) {
   const token = jwt.sign({ sub: userId }, jwtSecret!, { expiresIn: '7d' });
   res.cookie('studyverse_session', token, cookieOptions);
@@ -223,7 +211,7 @@ const onlineUsers = new Set<string>();
 const authAttempts = new Map<string, { count: number; resetAt: number }>();
 function limitAuthAttempts(req: Request, res: Response, next: NextFunction) {
   const key = `${req.ip}:${req.path}`;
-  res.once('finish', () => { if (res.statusCode < 400) authAttempts.delete(key); });
+  res.once('finish', () => { if (res.statusCode === 200) authAttempts.delete(key); });
   const timestamp = Date.now();
   const current = authAttempts.get(key);
   if (!current || current.resetAt <= timestamp) {
@@ -234,12 +222,10 @@ function limitAuthAttempts(req: Request, res: Response, next: NextFunction) {
   current.count += 1;
   next();
 }
-const registrationSchema = z.object({
-  email: z.string().email().max(254),
-  password: z.string().min(10).max(128),
-  nickname: z.string().trim().min(2).max(24)
+const loginSchema = z.object({
+  name: z.string().trim().min(2).max(24),
+  password: z.string().min(10).max(128)
 });
-const loginSchema = z.object({ email: z.string().email().max(254), password: z.string().min(1).max(128) });
 function friendPair(a: string, b: string) {
   return a < b ? [a, b] : [b, a];
 }
@@ -278,105 +264,60 @@ function addXp(userId: string, amount: number) {
 }
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, storage: 'sqlite' }));
-app.get('/api/auth/google', limitAuthAttempts, (_req, res) => {
-  if (!googleOAuthClient) return googleAuthRedirect(res, 'google_not_configured');
-  const state = crypto.randomBytes(32).toString('base64url');
-  const nonce = crypto.randomBytes(32).toString('base64url');
-  res.cookie('google_oauth_state', state, googleStateCookieOptions);
-  res.cookie('google_oauth_nonce', nonce, googleStateCookieOptions);
-  const authorizationUrl = googleOAuthClient.generateAuthUrl({
-    response_type: 'code',
-    scope: ['openid', 'email', 'profile'],
-    state,
-    nonce,
-    prompt: 'select_account'
-  });
-  return res.redirect(authorizationUrl);
-});
-app.get('/api/auth/google/callback', limitAuthAttempts, async (req: SessionRequest, res) => {
-  const stateCookie = req.cookies?.google_oauth_state;
-  const nonceCookie = req.cookies?.google_oauth_nonce;
-  clearGoogleOAuthCookies(res);
-  if (!googleOAuthClient || !googleClientId || !googleRedirectUri) return googleAuthRedirect(res, 'google_not_configured');
-  if (typeof req.query.error === 'string') return googleAuthRedirect(res, 'google_cancelled');
-  const state = typeof req.query.state === 'string' ? req.query.state : undefined;
-  const code = typeof req.query.code === 'string' ? req.query.code : undefined;
-  if (!matchesOAuthValue(state, stateCookie) || !nonceCookie || !code) return googleAuthRedirect(res, 'google_invalid_state');
-
-  try {
-    const { tokens } = await googleOAuthClient.getToken({ code, redirect_uri: googleRedirectUri });
-    if (!tokens.id_token) return googleAuthRedirect(res, 'google_failed');
-    const ticket = await googleOAuthClient.verifyIdToken({ idToken: tokens.id_token, audience: googleClientId });
-    const profile = ticket.getPayload();
-    if (!profile?.sub || !profile.email || profile.email_verified !== true ||
-        !matchesOAuthValue(profile.nonce, nonceCookie)) return googleAuthRedirect(res, 'google_invalid_identity');
-
-    const email = profile.email.trim().toLowerCase();
-    const googleSub = profile.sub;
-    const displayName = Array.from(profile.name?.trim() ?? '').slice(0, 24).join('') || 'Google 탐험가';
-    const picture = profile.picture && new URL(profile.picture).protocol === 'https:' ? profile.picture : '';
-    let user: { id: string; google_sub: string | null } | null =
-      row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE google_sub = ?', [googleSub]) ?? null;
-
-    if (!user) {
-      const emailUser = row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE lower(email) = ?', [email]);
-      if (!emailUser) {
-        const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('base64url'), 12);
-        user = transaction(() => {
-          const byGoogle = row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE google_sub = ?', [googleSub]);
-          if (byGoogle) return byGoogle;
-          const byEmail = row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE lower(email) = ?', [email]);
-          if (byEmail) {
-            if (byEmail.google_sub && byEmail.google_sub !== googleSub) return null;
-            run('UPDATE users SET google_sub = ?, avatar = CASE WHEN avatar = \'\' THEN ? ELSE avatar END WHERE id = ?', [googleSub, picture, byEmail.id]);
-            return row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE id = ?', [byEmail.id])!;
-          }
-          let userId: string;
-          do { userId = `SV${crypto.randomInt(10000000, 100000000)}`; }
-          while (row('SELECT 1 FROM users WHERE user_id = ?', [userId]));
-          const id = createId();
-          run('INSERT INTO users (id, user_id, email, password_hash, nickname, avatar, created_at, google_sub) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [id, userId, email, passwordHash, displayName, picture, now(), googleSub]);
-          return row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE id = ?', [id])!;
-        });
-      } else if (emailUser.google_sub && emailUser.google_sub !== googleSub) {
-        return googleAuthRedirect(res, 'google_account_conflict');
-      } else {
-        run('UPDATE users SET google_sub = ?, avatar = CASE WHEN avatar = \'\' THEN ? ELSE avatar END WHERE id = ? AND (google_sub IS NULL OR google_sub = ?)',
-          [googleSub, picture, emailUser.id, googleSub]);
-        user = row<{ id: string; google_sub: string | null }>('SELECT id, google_sub FROM users WHERE id = ?', [emailUser.id]) ?? null;
-      }
-    }
-
-    if (!user || user.google_sub !== googleSub) return googleAuthRedirect(res, 'google_account_conflict');
-    persist();
-    issueCookie(res, user.id);
-    return res.redirect('/');
-  } catch (error) {
-    console.error('Google OAuth callback failed:', error instanceof Error ? error.message : 'Unknown error');
-    return googleAuthRedirect(res, 'google_failed');
-  }
-});
-app.post('/api/auth/register', limitAuthAttempts, async (req, res) => {
-  const parsed = registrationSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: '이메일, 닉네임 또는 비밀번호를 확인해 주세요.' });
-  const { email, password, nickname } = parsed.data;
-  if (row('SELECT 1 FROM users WHERE lower(email) = lower(?)', [email])) return res.status(409).json({ error: '이미 가입된 이메일입니다.' });
-  const id = createId();
-  const userId = `SV${crypto.randomInt(10000000, 100000000)}`;
-  const passwordHash = await bcrypt.hash(password, 12);
-  run('INSERT INTO users (id, user_id, email, password_hash, nickname, created_at) VALUES (?, ?, ?, ?, ?, ?)', [id, userId, email.toLowerCase(), passwordHash, nickname, now()]);
-  persist();
-  issueCookie(res, id);
-  res.status(201).json({ user: userView(row('SELECT * FROM users WHERE id = ?', [id])!) });
-});
 app.post('/api/auth/login', limitAuthAttempts, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: '이메일 또는 비밀번호를 확인해 주세요.' });
-  const user = row<{ id: string; password_hash: string }>('SELECT id, password_hash FROM users WHERE lower(email) = lower(?)', [parsed.data.email]);
-  if (!user || !(await bcrypt.compare(parsed.data.password, user.password_hash))) return res.status(401).json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
-  issueCookie(res, user.id);
-  res.json({ user: userView(row('SELECT * FROM users WHERE id = ?', [user.id])!) });
+  if (!parsed.success) return res.status(400).json({ error: '이름은 2~24자, 비밀번호는 10~128자로 입력해 주세요.' });
+  const { name, password } = parsed.data;
+  const existing = row<{ id: string; password_hash: string }>(
+    'SELECT id, password_hash FROM users WHERE lower(login_name) = lower(?)',
+    [name]
+  );
+  if (existing) {
+    if (!(await bcrypt.compare(password, existing.password_hash))) {
+      return res.status(401).json({ error: '이름 또는 비밀번호가 올바르지 않습니다.' });
+    }
+    issueCookie(res, existing.id);
+    return res.json({ user: userView(row('SELECT * FROM users WHERE id = ?', [existing.id])!) });
+  }
+
+  const passwordHash = await bcrypt.hash(password, 12);
+  const result = transaction(() => {
+    const concurrentUser = row<{ id: string; password_hash: string }>(
+      'SELECT id, password_hash FROM users WHERE lower(login_name) = lower(?)',
+      [name]
+    );
+    if (concurrentUser) return { kind: 'existing' as const, user: concurrentUser };
+
+    const legacyUser = row(
+      'SELECT 1 FROM users WHERE login_name IS NULL AND lower(trim(nickname)) = lower(?) LIMIT 1',
+      [name]
+    );
+    if (legacyUser) return { kind: 'legacy' as const };
+
+    let userId: string;
+    do { userId = `SV${crypto.randomInt(10000000, 100000000)}`; }
+    while (row('SELECT 1 FROM users WHERE user_id = ?', [userId]));
+    const id = createId();
+    run(
+      'INSERT INTO users (id, user_id, email, login_name, password_hash, nickname, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, userId, `account+${id}@local.invalid`, name, passwordHash, name, now()]
+    );
+    return {
+      kind: 'created' as const,
+      user: row<{ id: string; password_hash: string }>('SELECT id, password_hash FROM users WHERE id = ?', [id])!
+    };
+  });
+
+  if (result.kind === 'legacy') {
+    return res.status(409).json({ error: '이 이름은 기존 계정과 겹쳐 새 계정으로 사용할 수 없습니다.' });
+  }
+  if (result.kind === 'existing' && !(await bcrypt.compare(password, result.user.password_hash))) {
+    return res.status(401).json({ error: '이름 또는 비밀번호가 올바르지 않습니다.' });
+  }
+  if (result.kind === 'created') persist();
+  issueCookie(res, result.user.id);
+  return res.status(result.kind === 'created' ? 201 : 200)
+    .json({ user: userView(row('SELECT * FROM users WHERE id = ?', [result.user.id])!) });
 });
 app.post('/api/auth/logout', (_req, res) => {
   res.clearCookie('studyverse_session', { path: '/' });
@@ -396,7 +337,7 @@ app.get('/api/auth/me', (req: SessionRequest, res) => {
     res.clearCookie('studyverse_session', { path: '/' });
     return res.json({ user: null });
   }
-  const user = row('SELECT id, user_id, email, nickname, avatar, coins, xp, level FROM users WHERE id = ?', [payload.sub]);
+  const user = row('SELECT id, user_id, login_name, nickname, avatar, coins, xp, level FROM users WHERE id = ?', [payload.sub]);
   if (!user) return res.json({ user: null });
   res.json({ user: userView(user as Parameters<typeof userView>[0]) });
 });
@@ -417,7 +358,7 @@ app.patch('/api/profile', auth, (req: SessionRequest, res) => {
 
 app.get('/api/dashboard', auth, (req: SessionRequest, res) => {
   const userId = req.userId!;
-  const user = row('SELECT id, user_id, email, nickname, avatar, coins, xp, level FROM users WHERE id = ?', [userId])!;
+  const user = row('SELECT id, user_id, login_name, nickname, avatar, coins, xp, level FROM users WHERE id = ?', [userId])!;
   const study = rows<{ subject: string; minutes: number; created_at: string }>('SELECT subject, minutes, created_at FROM study_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 50', [userId]);
   const quizzes = rows<{ subject: string; score: number; total: number }>('SELECT subject, score, total FROM quiz_results WHERE user_id = ? ORDER BY created_at DESC LIMIT 50', [userId]);
   const exams = rows('SELECT id, subject, title, exam_date AS date FROM exams WHERE user_id = ? AND exam_date >= ? ORDER BY exam_date LIMIT 10', [userId, new Date().toISOString().slice(0, 10)]);

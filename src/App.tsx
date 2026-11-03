@@ -6,7 +6,7 @@ import {
   Send, Shield, ShoppingBag, Sparkles, Target, Trophy, UserRound, Users, X, Zap
 } from 'lucide-react';
 
-type User = { id: string; userId: string; email: string; nickname: string; avatar: string; coins: number; xp: number; level: number };
+type User = { id: string; userId: string; loginName: string; nickname: string; avatar: string; coins: number; xp: number; level: number };
 type Subject = '국어' | '영어' | '수학' | '과학' | '사회';
 type Page = 'home' | 'study' | 'quiz' | 'friends' | 'arena' | 'shop' | 'profile';
 type Friend = { id: string; user_id: string; nickname: string; avatar: string; online?: boolean };
@@ -79,31 +79,16 @@ function PlanList({ plans, onToggle, emptyText }: { plans: StudyPlan[]; onToggle
 }
 
 function AuthScreen({ onLogin }: { onLogin: (user: User) => void }) {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [error, setError] = useState(() => {
-    const url = new URL(window.location.href);
-    const code = url.searchParams.get('authError');
-    if (!code) return '';
-    const messages: Record<string, string> = {
-      google_not_configured: 'Google 로그인이 아직 설정되지 않았습니다. 서버 환경변수를 확인해 주세요.',
-      google_cancelled: 'Google 로그인이 취소되었습니다.',
-      google_invalid_state: 'Google 인증 요청을 확인할 수 없습니다. 다시 시도해 주세요.',
-      google_invalid_identity: 'Google 계정을 확인하지 못했습니다. 이메일 인증 상태를 확인해 주세요.',
-      google_account_conflict: '이 이메일은 다른 Google 계정에 연결되어 있습니다. 이메일 로그인을 이용해 주세요.',
-      google_failed: 'Google 로그인에 실패했습니다. 잠시 후 다시 시도해 주세요.'
-    };
-    url.searchParams.delete('authError');
-    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
-    return messages[code] ?? 'Google 로그인에 실패했습니다. 다시 시도해 주세요.';
-  });
+  const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError('');
     setBusy(true);
-    const data = Object.fromEntries(new FormData(event.currentTarget).entries());
+    const form = event.currentTarget;
+    const data = Object.fromEntries(new FormData(form).entries());
     try {
-      const result = await api<{ user: User }>(`/api/auth/${mode}`, json(data));
+      const result = await api<{ user: User }>('/api/auth/login', json(data));
       onLogin(result.user);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '로그인에 실패했습니다.');
@@ -115,21 +100,13 @@ function AuthScreen({ onLogin }: { onLogin: (user: User) => void }) {
     <div className="auth-orbit orbit-one" /><div className="auth-orbit orbit-two" />
     <div className="auth-card">
       <a className="brand auth-brand" href="#"><span className="brand-mark"><Sparkles size={20} /></span><span>STUDYVERSE<small>PRO</small></span></a>
-      <div className="auth-intro"><span className="eyebrow">YOUR UNIVERSE, YOUR PACE</span><h1>공부와 플레이를<br /><span>하나의 궤도에.</span></h1><p>오늘의 배움이 내일의 레벨이 되는 곳.</p></div>
+      <div className="auth-intro"><span className="eyebrow">YOUR UNIVERSE, YOUR PACE</span><h1>이름과 비밀번호로<br /><span>간편하게 시작해요.</span></h1><p>처음 입력한 이름이면 계정이 자동으로 만들어져요.</p></div>
       <form className="auth-form" onSubmit={submit}>
-        {mode === 'register' && <label>닉네임<input name="nickname" autoComplete="nickname" placeholder="우주 탐험가" required minLength={2} maxLength={24} /></label>}
-        <label>이메일<input name="email" type="email" autoComplete="email" placeholder="hello@example.com" required /></label>
-        <label>비밀번호<input name="password" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder={mode === 'register' ? '10자 이상 입력' : '비밀번호를 입력해 주세요'} required minLength={mode === 'register' ? 10 : 1} /></label>
+        <label>이름<input name="name" autoComplete="username" placeholder="사용할 이름" required minLength={2} maxLength={24} /></label>
+        <label>비밀번호<input name="password" type="password" autoComplete="current-password" placeholder="10자 이상 입력" required minLength={10} maxLength={128} /></label>
         {error && <p className="form-error">{error}</p>}
-        <button className="primary-button wide" disabled={busy}>{busy ? '잠시만요…' : mode === 'login' ? '로그인' : '무료 계정 만들기'}<ArrowRight size={17} /></button>
+        <button className="primary-button wide" disabled={busy}>{busy ? '잠시만요…' : '로그인 · 자동 가입'}<ArrowRight size={17} /></button>
       </form>
-      {mode === 'login' && <>
-        <div className="auth-divider"><span>또는</span></div>
-        <button className="google-login-button" type="button" disabled={busy} onClick={() => window.location.assign('/api/auth/google')}>
-          <span className="google-mark" aria-hidden="true">G</span>Google로 로그인
-        </button>
-      </>}
-      <p className="auth-switch">{mode === 'login' ? '처음 오셨나요?' : '이미 계정이 있나요?'} <button onClick={() => { setError(''); setMode(mode === 'login' ? 'register' : 'login'); }}>{mode === 'login' ? '회원가입' : '로그인'}</button></p>
       <div className="auth-security"><Shield size={14} /> 비밀번호는 암호화되어 안전하게 저장됩니다.</div>
     </div>
   </main>;
@@ -981,7 +958,7 @@ function ProfilePage({ user, onUpdate, onLogout, notify }: { user: User; onUpdat
     <div className="page-title"><div><span className="eyebrow">EXPLORER PROFILE</span><h1>내 프로필</h1><p>나만의 학습 우주 정보를 관리해요.</p></div><span className="title-badge"><Award size={17} /> LEVEL {user.level}</span></div>
     <div className="profile-grid">
       <section className="panel profile-card"><div className="profile-cover"><span>✦</span><span>✧</span><span>·</span></div><Avatar user={user} size="lg" /><h2>{user.nickname}</h2><p className="user-id">ID · {user.userId}</p><div className="profile-xp"><span>레벨 {user.level}</span><span>{user.xp % 100} / 100 XP</span><i><b style={{ width: `${user.xp % 100}%` }} /></i></div><div className="profile-stats"><span><Coins size={16} />{user.coins} 코인</span><span><Sparkles size={16} />총 {user.xp} XP</span></div></section>
-      <section className="panel profile-edit"><div className="panel-heading"><div><span className="eyebrow">PERSONALIZE</span><h2>프로필 편집</h2></div><UserRound size={18} className="muted-icon" /></div><form className="stack-form" onSubmit={save}><label>닉네임<input value={nickname} onChange={event => setNickname(event.target.value)} minLength={2} maxLength={24} required /></label><label>프로필 이미지 URL<input type="url" value={avatar} onChange={event => setAvatar(event.target.value)} placeholder="https://example.com/avatar.png" /></label><label>계정 이메일<input value={user.email} disabled /></label><button className="primary-button wide">변경사항 저장 <Check size={16} /></button></form>{error && <p className="inline-error">{error}</p>}<button className="logout-button" onClick={onLogout}><LogOut size={16} /> 로그아웃</button></section>
+      <section className="panel profile-edit"><div className="panel-heading"><div><span className="eyebrow">PERSONALIZE</span><h2>프로필 편집</h2></div><UserRound size={18} className="muted-icon" /></div><form className="stack-form" onSubmit={save}><label>닉네임<input value={nickname} onChange={event => setNickname(event.target.value)} minLength={2} maxLength={24} required /></label><label>프로필 이미지 URL<input type="url" value={avatar} onChange={event => setAvatar(event.target.value)} placeholder="https://example.com/avatar.png" /></label><label>로그인 이름<input value={user.loginName || '이전할 수 없는 기존 계정'} disabled /></label><button className="primary-button wide">변경사항 저장 <Check size={16} /></button></form>{error && <p className="inline-error">{error}</p>}<button className="logout-button" onClick={onLogout}><LogOut size={16} /> 로그아웃</button></section>
     </div>
   </div>;
 }
