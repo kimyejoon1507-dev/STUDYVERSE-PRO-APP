@@ -18,7 +18,7 @@ type StudyPlan = { id: string; subject: Subject; title: string; date: string; ta
 type Exam = { id: string; subject: Subject; title: string; date: string };
 type StoreItem = { id: string; name: string; category: string; description: string; price: number; max: number };
 type InventoryItem = { itemId: string; quantity: number; equipped: number };
-type PurchaseRecord = { itemId: string; price: number; purchasedAt: string };
+type PurchaseRecord = { itemId: string; itemName: string; price: number; currency: 'coins' | 'gems'; purchasedAt: string };
 type DailyMission = { id: string; title: string; detail: string; target: number; progress: number; coins: number; xp: number; completed: boolean; claimed: boolean };
 type Achievement = { id: string; title: string; detail: string; progress: number; target: number; unlocked: boolean };
 type QuizMistake = { id: string; subject: Subject; question: string; correctAnswer: string; submittedAnswer: string; createdAt: string };
@@ -472,33 +472,35 @@ type Brawler = {
   attackStyle: string; specialName: string; special: string; kit: BrawlerKit; requiredCorrect: number;
   freeDay: number | null; freeToday: boolean; price: number; owned: boolean;
 };
+type ArenaShopState = {
+  coins: number; gems: number; dailyRewardClaimed: boolean;
+  exchanges: { coinsToGems: boolean; gemsToCoins: boolean };
+  limitedOffer: { brawlerId: string; price: number; brawler: Brawler };
+};
 type BrawlerQuestion = { id: string; subject: string; difficulty: BrawlerDifficulty; question: string; options: string[] };
 type BrawlerBoard = { gems: number; weekday: number; freeBrawlerId: string | null; selectedBrawlerId: string; owned: string[]; brawlers: Brawler[] };
 type QuizChallenge = { challengeToken: string; isFree: boolean; gems: number; brawler: Pick<Brawler, 'id' | 'name' | 'image' | 'rarity'> & { requiredCorrect: number }; questions: BrawlerQuestion[] };
 type QuizFeedback = { correct: boolean; correctAnswer: string; explanation: string; correctCount: number; total: number; completed: boolean; passed: boolean; gems: number; brawler: Pick<Brawler, 'id' | 'name' | 'image' | 'rarity'> | null };
-type ShooterEnemy = { x: number; y: number; hp: number; maxHp: number; speed: number; radius: number; color: string; kind: 'drifter' | 'sprinter' | 'thinker' };
-type ShooterBullet = { x: number; y: number; vx: number; vy: number; life: number; damage: number; piercing: boolean; returnAt: number; returning: boolean };
+type ShooterEnemy = { x: number; y: number; hp: number; maxHp: number; speed: number; radius: number; color: string; attackCooldown: number; kind: 'drifter' | 'sprinter' | 'thinker' };
+type ShooterBullet = { x: number; y: number; vx: number; vy: number; life: number; damage: number; piercing: boolean; returnAt: number; returning: boolean; hitEnemies: Set<ShooterEnemy> };
 type ShooterDrop = { x: number; y: number; kind: 'health' | 'energy' | 'growth'; life: number };
+type ShooterDamage = { x: number; y: number; amount: number; life: number; color: string };
 type ArenaPointer = { zone: 'move' | 'aim'; originX: number; originY: number };
 type ShooterState = {
   player: { x: number; y: number; hp: number; maxHp: number; energy: number; speed: number; attack: number; color: string; brawler: Brawler; shield: number };
-  enemies: ShooterEnemy[]; bullets: ShooterBullet[]; drops: ShooterDrop[]; score: number; wave: number; elapsed: number;
+  enemies: ShooterEnemy[]; bullets: ShooterBullet[]; drops: ShooterDrop[]; damageNumbers: ShooterDamage[]; score: number; wave: number; elapsed: number;
   spawnTimer: number; dropTimer: number; fireTimer: number; specialCooldown: number; startedAt: number;
   runId: string; mode: GameMode; lastFrame: number;
 };
 const rarityTone: Record<string, string> = { 일반: '#91a4bc', 희귀: '#55b77d', 초희귀: '#52aee0', 영웅: '#a47be5', 신화: '#dd72c5', 전설: '#f0ae59' };
 const weekdayNames = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
-function BrawlerCard({ brawler, selected, gems, busy, onSelect, onChallenge }: {
-  brawler: Brawler; selected: boolean; gems: number; busy: boolean; onSelect: () => void; onChallenge: () => void;
+function BrawlerCard({ brawler, selected, onOpen }: {
+  brawler: Brawler; selected: boolean; onOpen: () => void;
 }) {
-  return <article className={`brawler-card rarity-${brawler.rarity} ${brawler.owned ? 'owned' : 'locked'} ${selected ? 'selected' : ''}`} style={{ borderTopColor: rarityTone[brawler.rarity] ?? '#91a4bc' }}>
-    <div className="brawler-art"><span className="brawler-portrait">{brawler.image}</span><small>{brawler.rarity}</small>{brawler.freeToday && !brawler.owned && <i>오늘 무료</i>}</div>
-    <div className="brawler-card-copy"><div><h3>{brawler.name}</h3>{selected && <span className="brawler-selected-badge">선택됨</span>}</div><p>{brawler.attackStyle}</p><small>체력 {brawler.hp} · 공격 {brawler.attack} · 이동 {brawler.speed}</small><small className="brawler-special">{brawler.specialName} · {brawler.special}</small>
-      {brawler.owned ? <button className={selected ? 'secondary-button' : 'primary-button compact'} onClick={onSelect} disabled={selected}>{selected ? '전투 준비 완료' : '브롤러 선택'}</button>
-        : <button className="brawler-challenge-button" onClick={onChallenge} disabled={busy || (!brawler.freeToday && gems < brawler.price)}>{brawler.freeToday ? '오늘의 무료 퀴즈' : `퀴즈 도전 · 💎 ${brawler.price}`}</button>}
-      {!brawler.owned && !brawler.freeToday && gems < brawler.price && <small className="gem-shortage">보석이 부족해요</small>}
-    </div>
-  </article>;
+  return <button type="button" className={`brawler-card rarity-${brawler.rarity} ${brawler.owned ? 'owned' : 'locked'} ${selected ? 'selected' : ''}`} style={{ borderTopColor: rarityTone[brawler.rarity] ?? '#91a4bc' }} onClick={onOpen}>
+    <span className="brawler-art"><span className="brawler-portrait">{brawler.image}</span><small>{brawler.rarity}</small>{brawler.freeToday && !brawler.owned && <i>오늘 무료</i>}<b className="brawler-lock-mark">{brawler.owned ? selected ? '출전 중' : '보유' : '잠김'}</b></span>
+    <span className="brawler-card-copy"><span><strong>{brawler.name}</strong>{selected && <i className="brawler-selected-badge">선택됨</i>}</span><span>{brawler.attackStyle}</span><small>체력 {brawler.hp} · 공격 {brawler.attack} · 이동 {brawler.speed}</small><small className="brawler-special">{brawler.specialName}</small><b className="brawler-open-link">{brawler.owned ? '상세 정보 보기' : `상세 정보 · 💎 ${brawler.price}`}</b></span>
+  </button>;
 }
 function BrawlerQuizModal({ quiz, question, questionIndex, feedback, busy, error, onAnswer, onNext, onClose }: {
   quiz: QuizChallenge; question?: BrawlerQuestion; questionIndex: number; feedback: QuizFeedback | null;
@@ -531,16 +533,23 @@ function BrawlerQuizModal({ quiz, question, questionIndex, feedback, busy, error
     </> : <p className="empty-note">문제를 불러오고 있어요.</p>}
   </section></div>;
 }
-function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; notify: (message: string) => void }) {
+function ArenaGame({ user, refreshUser, notify }: { user: User; refreshUser: () => Promise<void>; notify: (message: string) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const keys = useRef(new Set<string>());
   const pointers = useRef(new Map<number, ArenaPointer>());
   const controls = useRef({ moveX: 0, moveY: 0, aimX: 1, aimY: 0, firing: false, basicQueued: false, specialQueued: false, mouseX: 0, mouseY: 0 });
   const state = useRef<ShooterState | null>(null);
   const [board, setBoard] = useState<BrawlerBoard | null>(null);
-  const [tab, setTab] = useState<'collection' | 'battle'>('collection');
+  const [tab, setTab] = useState<'collection' | 'shop' | 'battle'>('collection');
+  const [shop, setShop] = useState<ArenaShopState | null>(null);
+  const [shopBusy, setShopBusy] = useState(false);
+  const [detailBrawler, setDetailBrawler] = useState<Brawler | null>(null);
+  const [rarityFilter, setRarityFilter] = useState('전체');
+  const [ownershipFilter, setOwnershipFilter] = useState<'all' | 'owned' | 'locked'>('all');
+  const [sortOrder, setSortOrder] = useState<'rarity' | 'name' | 'power'>('rarity');
   const [mode, setMode] = useState<GameMode>('idle');
-  const [hud, setHud] = useState({ hp: 100, maxHp: 100, energy: 0, score: 0, wave: 1, specialCooldown: 0 });
+  const [hud, setHud] = useState({ hp: 100, maxHp: 100, attack: 14, energy: 0, score: 0, wave: 1, specialCooldown: 0 });
+  const [gameResult, setGameResult] = useState<'victory' | 'defeat' | 'abandoned' | null>(null);
   const [controlsHud, setControlsHud] = useState({ moveX: 0, moveY: 0, aimX: 0, aimY: 0 });
   const [quiz, setQuiz] = useState<QuizChallenge | null>(null);
   const [quizIndex, setQuizIndex] = useState(0);
@@ -553,7 +562,11 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
   const loadBrawlers = useCallback(async () => {
     setBoard(await api<BrawlerBoard>('/api/game/brawlers'));
   }, []);
+  const loadArenaShop = useCallback(async () => {
+    setShop(await api<ArenaShopState>('/api/game/shop'));
+  }, []);
   useEffect(() => { void loadBrawlers().catch(reason => setError(reason instanceof Error ? reason.message : '브롤러 정보를 불러오지 못했습니다.')); }, [loadBrawlers]);
+  useEffect(() => { void loadArenaShop().catch(reason => setError(reason instanceof Error ? reason.message : '아레나 상점을 불러오지 못했습니다.')); }, [loadArenaShop]);
   const updateJoystick = useCallback((pointerId: number, x: number, y: number) => {
     const pointer = pointers.current.get(pointerId);
     if (!pointer) return;
@@ -608,28 +621,58 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
       setControlsHud(current => ({ ...current, moveX: 0, moveY: 0 }));
     } else if (pointer?.zone === 'aim') setControlsHud(current => ({ ...current, aimX: 0, aimY: 0 }));
   };
-  const finishGame = useCallback((reason = '활동 종료') => {
+  const finishGame = useCallback((reason = '활동 종료', result: 'victory' | 'defeat' | 'abandoned' = 'abandoned') => {
     const game = state.current;
     if (!game || game.mode !== 'playing') return;
     game.mode = 'over'; setMode('over');
+    setGameResult(result);
     void api<{ coins: number; xp: number; gems: number; rewardsLimited: boolean }>('/api/game/finish', json({ runId: game.runId, score: game.score }))
       .then(async reward => {
-        const latest = await api<BrawlerBoard>('/api/game/brawlers');
-        setBoard(latest); await refreshUser();
+        const [latest] = await Promise.all([api<BrawlerBoard>('/api/game/brawlers'), loadArenaShop(), refreshUser()]);
+        setBoard(latest);
         notify(`${reason} · +${reward.coins} 코인 · +${reward.gems} 보석 · +${reward.xp} XP`);
       }).catch(failure => setGameError(failure instanceof Error ? failure.message : '게임 결과를 저장하지 못했습니다.'));
-  }, [notify, refreshUser]);
+  }, [loadArenaShop, notify, refreshUser]);
   async function selectBrawler(brawler: Brawler) {
     if (!brawler.owned || brawler.id === board?.selectedBrawlerId) return;
     setError('');
-    try { await api('/api/game/brawlers/select', json({ brawlerId: brawler.id })); await loadBrawlers(); notify(`${brawler.name} 브롤러를 선택했어요.`); }
+    try { await api('/api/game/brawlers/select', json({ brawlerId: brawler.id })); await loadBrawlers(); setDetailBrawler(null); notify(`${brawler.name} 브롤러를 선택했어요.`); }
     catch (reason) { setError(reason instanceof Error ? reason.message : '브롤러를 선택하지 못했습니다.'); }
+  }
+  async function buyBrawler(brawler: Brawler, limited = false) {
+    setError(''); setShopBusy(true);
+    try {
+      await api('/api/game/shop/buy-brawler', json({ brawlerId: brawler.id, limited }));
+      await Promise.all([loadBrawlers(), loadArenaShop()]);
+      setDetailBrawler(null);
+      notify(`${brawler.name} 브롤러를 영구 보유했어요.`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '브롤러를 구매하지 못했습니다.'); }
+    finally { setShopBusy(false); }
+  }
+  async function claimArenaGift() {
+    setShopBusy(true); setError('');
+    try {
+      await api('/api/game/shop/claim', json({}));
+      await Promise.all([loadArenaShop(), loadBrawlers(), refreshUser()]);
+      notify('무료 보상을 받았어요. +25 코인 · +5 보석');
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '무료 보상을 받지 못했습니다.'); }
+    finally { setShopBusy(false); }
+  }
+  async function exchangeCurrency(direction: 'coinsToGems' | 'gemsToCoins') {
+    setShopBusy(true); setError('');
+    try {
+      await api('/api/game/shop/exchange', json({ direction }));
+      await Promise.all([loadArenaShop(), loadBrawlers(), refreshUser()]);
+      notify(direction === 'coinsToGems' ? '100 코인을 10 보석으로 교환했어요.' : '10 보석을 100 코인으로 교환했어요.');
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '재화를 교환하지 못했습니다.'); }
+    finally { setShopBusy(false); }
   }
   async function startChallenge(brawler: Brawler) {
     setError(''); setQuizFeedback(null); setQuizBusy(true);
     try {
       const result = await api<QuizChallenge>('/api/game/brawlers/challenge', json({ brawlerId: brawler.id }));
-      setQuiz(result); setQuizIndex(0); setQuizFeedback(null); setBoard(current => current ? { ...current, gems: result.gems } : current);
+      setDetailBrawler(null); setQuiz(result); setQuizIndex(0); setQuizFeedback(null); setBoard(current => current ? { ...current, gems: result.gems } : current);
+      void loadArenaShop();
     } catch (reason) { setError(reason instanceof Error ? reason.message : '퀴즈를 시작하지 못했습니다.'); }
     finally { setQuizBusy(false); }
   }
@@ -661,12 +704,13 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
       };
       state.current = {
         player: { x: width / 2, y: height / 2, hp: playerStats.maxHp, maxHp: playerStats.maxHp, energy: 0, speed: playerStats.speed, attack: playerStats.power, color: playerStats.color, brawler, shield: 0 },
-        enemies: [], bullets: [], drops: [], score: 0, wave: 1, elapsed: 0, spawnTimer: .5, dropTimer: 8,
+        enemies: [], bullets: [], drops: [], damageNumbers: [], score: 0, wave: 1, elapsed: 0, spawnTimer: .5, dropTimer: 8,
         fireTimer: 0, specialCooldown: 0, startedAt: Date.now(), runId, mode: 'playing', lastFrame: 0
       };
       controls.current = { ...controls.current, moveX: 0, moveY: 0, firing: false, basicQueued: false, specialQueued: false };
       keys.current.clear(); pointers.current.clear(); setControlsHud({ moveX: 0, moveY: 0, aimX: 0, aimY: 0 });
-      setHud({ hp: playerStats.maxHp, maxHp: playerStats.maxHp, energy: 0, score: 0, wave: 1, specialCooldown: 0 });
+      setHud({ hp: playerStats.maxHp, maxHp: playerStats.maxHp, attack: playerStats.power, energy: 0, score: 0, wave: 1, specialCooldown: 0 });
+      setGameResult(null);
       setTab('battle'); setMode('playing');
     } catch (reason) { setGameError(reason instanceof Error ? reason.message : '전투를 시작할 수 없습니다.'); }
   }
@@ -702,7 +746,7 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
       const y = edge === 2 ? 8 : edge === 3 ? height - 8 : Math.random() * height;
       const kind = Math.random() < .23 + Math.min(.25, game.wave * .02) ? 'sprinter' : Math.random() < .22 ? 'thinker' : 'drifter';
       const hp = (kind === 'thinker' ? 65 : kind === 'sprinter' ? 25 : 39) + game.wave * 3;
-      game.enemies.push({ x, y, hp, maxHp: hp, speed: (kind === 'thinker' ? 42 : kind === 'sprinter' ? 105 : 63) + game.wave * 1.6, radius: kind === 'thinker' ? 18 : 13, color: kind === 'thinker' ? '#f2b565' : kind === 'sprinter' ? '#e879a5' : '#9d87ef', kind });
+      game.enemies.push({ x, y, hp, maxHp: hp, speed: (kind === 'thinker' ? 42 : kind === 'sprinter' ? 105 : 63) + game.wave * 1.6, radius: kind === 'thinker' ? 18 : 13, color: kind === 'thinker' ? '#f2b565' : kind === 'sprinter' ? '#e879a5' : '#9d87ef', attackCooldown: 0, kind });
     };
     const fire = (game: ShooterState, angle: number, offset = 0) => {
       const player = game.player, kit = player.brawler.kit;
@@ -716,7 +760,7 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
           vx: Math.cos(direction) * speed, vy: Math.sin(direction) * speed,
           life: kit === 'cone' ? .42 : kit === 'return' ? 1.4 : 1,
           damage: player.attack * (count === 3 ? .62 : count === 2 ? .72 : 1),
-          piercing: kit === 'beam', returnAt: kit === 'return' ? .42 : 99, returning: false
+          piercing: kit === 'beam', returnAt: kit === 'return' ? .42 : 99, returning: false, hitEnemies: new Set()
         });
       }
     };
@@ -736,7 +780,9 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
           const dx = enemy.x - player.x, dy = enemy.y - player.y, distance = Math.hypot(dx, dy);
           if (distance > radius) continue;
           if (kit === 'beam' && dx * Math.cos(angle) + dy * Math.sin(angle) < 0) continue;
-          enemy.hp -= player.attack * 2.8;
+          const damage = player.attack * 2.8;
+          enemy.hp = Math.max(0, enemy.hp - damage);
+          game.damageNumbers.push({ x: enemy.x, y: enemy.y - enemy.radius, amount: damage, life: .75, color: '#ffe6a1' });
           const push = kit === 'wave' || kit === 'fan';
           if (push && distance > 0) { enemy.x += dx / distance * 48; enemy.y += dy / distance * 48; }
         }
@@ -756,7 +802,7 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
       for (let y = 0; y < height; y += 38) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
       if (game?.mode === 'playing') {
         const player = game.player;
-        game.elapsed += dt; game.wave = Math.floor(game.elapsed / 20) + 1;
+        game.elapsed += dt; game.wave = Math.min(5, Math.floor(game.elapsed / 20) + 1);
         player.shield = Math.max(0, player.shield - dt);
         const keyX = (keys.current.has('d') || keys.current.has('arrowright') ? 1 : 0) - (keys.current.has('a') || keys.current.has('arrowleft') ? 1 : 0);
         const keyY = (keys.current.has('s') || keys.current.has('arrowdown') ? 1 : 0) - (keys.current.has('w') || keys.current.has('arrowup') ? 1 : 0);
@@ -808,8 +854,11 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
           }
           bullet.x += bullet.vx * dt; bullet.y += bullet.vy * dt;
           for (const enemy of game.enemies) {
-            if (enemy.hp > 0 && Math.hypot(enemy.x - bullet.x, enemy.y - bullet.y) < enemy.radius + 5) {
-              enemy.hp -= bullet.damage; player.energy = Math.min(100, player.energy + 5);
+            if (enemy.hp > 0 && !bullet.hitEnemies.has(enemy) && Math.hypot(enemy.x - bullet.x, enemy.y - bullet.y) < enemy.radius + 5) {
+              bullet.hitEnemies.add(enemy);
+              enemy.hp = Math.max(0, enemy.hp - bullet.damage);
+              game.damageNumbers.push({ x: enemy.x, y: enemy.y - enemy.radius, amount: bullet.damage, life: .75, color: '#ffffff' });
+              player.energy = Math.min(100, player.energy + 5);
               if (!bullet.piercing) { bullet.life = -1; break; }
             }
           }
@@ -819,16 +868,28 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
           if (enemy.hp <= 0) { game.score += enemy.kind === 'thinker' ? 45 : enemy.kind === 'sprinter' ? 30 : 25; return false; }
           const dx = player.x - enemy.x, dy = player.y - enemy.y, length = Math.hypot(dx, dy) || 1;
           enemy.x += dx / length * enemy.speed * dt; enemy.y += dy / length * enemy.speed * dt;
+          enemy.attackCooldown = Math.max(0, enemy.attackCooldown - dt);
           if (length < enemy.radius + 17) {
-            if (player.shield <= 0) player.hp -= (enemy.kind === 'thinker' ? 17 : 10) * dt * 2;
+            if (enemy.attackCooldown <= 0) {
+              enemy.attackCooldown = .5;
+              if (player.shield <= 0) {
+                const damage = enemy.kind === 'thinker' ? 17 : 10;
+                player.hp = Math.max(0, player.hp - damage);
+                game.damageNumbers.push({ x: player.x, y: player.y - 24, amount: damage, life: .75, color: '#ff8296' });
+              }
+            }
             if (enemy.kind === 'sprinter') { enemy.x -= dx / length * 35 * dt; enemy.y -= dy / length * 35 * dt; }
           }
           return true;
         });
-        if (player.hp <= 0) { player.hp = 0; finishGame('아레나 활동 종료'); }
+        if (player.hp <= 0) {
+          player.hp = 0;
+          setHud({ hp: 0, maxHp: player.maxHp, attack: player.attack, energy: player.energy, score: game.score, wave: game.wave, specialCooldown: game.specialCooldown });
+          finishGame('전투 패배', 'defeat');
+        } else if (game.elapsed >= 100) finishGame('5 웨이브 생존 승리', 'victory');
         if (time - lastHudAt > 110) {
           lastHudAt = time;
-          setHud({ hp: player.hp, maxHp: player.maxHp, energy: player.energy, score: game.score, wave: game.wave, specialCooldown: game.specialCooldown });
+          setHud({ hp: player.hp, maxHp: player.maxHp, attack: player.attack, energy: player.energy, score: game.score, wave: game.wave, specialCooldown: game.specialCooldown });
         }
       }
       if (game) {
@@ -844,8 +905,19 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
           ctx.beginPath(); ctx.arc(enemy.x, enemy.y, enemy.radius + 5, 0, Math.PI * 2); ctx.fillStyle = `${enemy.color}22`; ctx.fill();
           ctx.beginPath(); ctx.arc(enemy.x, enemy.y, enemy.radius, 0, Math.PI * 2); ctx.fillStyle = enemy.color; ctx.fill();
           ctx.beginPath(); ctx.arc(enemy.x, enemy.y, 3, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
-          if (enemy.hp < enemy.maxHp) { ctx.fillStyle = '#283149'; ctx.fillRect(enemy.x - enemy.radius, enemy.y - enemy.radius - 7, enemy.radius * 2, 3); ctx.fillStyle = '#71ddb5'; ctx.fillRect(enemy.x - enemy.radius, enemy.y - enemy.radius - 7, enemy.radius * 2 * Math.max(0, enemy.hp / enemy.maxHp), 3); }
+          ctx.fillStyle = '#283149'; ctx.fillRect(enemy.x - enemy.radius, enemy.y - enemy.radius - 7, enemy.radius * 2, 3);
+          ctx.fillStyle = '#71ddb5'; ctx.fillRect(enemy.x - enemy.radius, enemy.y - enemy.radius - 7, enemy.radius * 2 * Math.max(0, enemy.hp / enemy.maxHp), 3);
+          ctx.fillStyle = '#f4f4fa'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+          ctx.fillText(`${Math.ceil(enemy.hp)} / ${enemy.maxHp} HP`, enemy.x, enemy.y - enemy.radius - 9);
         }
+        game.damageNumbers = game.damageNumbers.filter(damage => {
+          damage.life -= dt; damage.y -= 28 * dt;
+          ctx.save(); ctx.globalAlpha = Math.min(1, damage.life / .2); ctx.fillStyle = damage.color;
+          ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.shadowColor = '#080b14'; ctx.shadowBlur = 4;
+          ctx.fillText(`-${damage.amount.toFixed(1)}`, damage.x, damage.y); ctx.restore();
+          return damage.life > 0;
+        });
         const player = game.player, angle = Math.atan2(controls.current.aimY, controls.current.aimX);
         ctx.save(); ctx.translate(player.x, player.y);
         if (player.shield > 0) { ctx.beginPath(); ctx.arc(0, 0, 26, 0, Math.PI * 2); ctx.strokeStyle = '#a998ff'; ctx.lineWidth = 3; ctx.stroke(); }
@@ -861,7 +933,7 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
     }
     frame = requestAnimationFrame(draw);
     return () => { cancelAnimationFrame(frame); observer.disconnect(); window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); };
-  }, [board, finishGame, isTouch]);
+  }, [board, finishGame, isTouch, tab]);
   const useAbility = (ability: 'basic' | 'special') => {
     if (mode !== 'playing') return;
     if (ability === 'basic') controls.current.basicQueued = true;
@@ -873,23 +945,44 @@ function ArenaGame({ refreshUser, notify }: { refreshUser: () => Promise<void>; 
   }
   const currentQuestion = quiz?.questions[quizIndex];
   const selectedBrawler = board?.brawlers.find(item => item.id === board.selectedBrawlerId);
+  const rarityOrder = ['일반', '희귀', '초희귀', '영웅', '신화', '전설'];
+  const visibleBrawlers = [...(board?.brawlers ?? [])]
+    .filter(brawler => rarityFilter === '전체' || brawler.rarity === rarityFilter)
+    .filter(brawler => ownershipFilter === 'all' || (ownershipFilter === 'owned' ? brawler.owned : !brawler.owned))
+    .sort((a, b) => sortOrder === 'name'
+      ? a.name.localeCompare(b.name, 'ko')
+      : sortOrder === 'power'
+        ? b.attack - a.attack
+        : rarityOrder.indexOf(a.rarity) - rarityOrder.indexOf(b.rarity) || a.name.localeCompare(b.name, 'ko'));
+  const detail = board?.brawlers.find(item => item.id === detailBrawler?.id) ?? detailBrawler;
   return <div className="page-stack">
-    <div className="page-title"><div><span className="eyebrow">BRAWLER COLLECTION · COSMIC ARENA</span><h1>브롤러 아레나</h1><p>학습 퀴즈로 브롤러를 모으고, 나만의 능력으로 아레나에 도전해요.</p></div><span className="title-badge"><Sparkles size={16} /> {board?.gems ?? 0} 보석</span></div>
-    <div className="brawler-tabs"><button className={tab === 'collection' ? 'active' : ''} onClick={() => { if (mode !== 'playing') setTab('collection'); }}>브롤러 수집 {board ? `(${board.owned.length}/${board.brawlers.length})` : ''}</button><button className={tab === 'battle' ? 'active' : ''} onClick={() => void showBattle()}>전투 아레나</button>{selectedBrawler && <span>출전 브롤러 <b>{selectedBrawler.image} {selectedBrawler.name}</b></span>}</div>
+    <div className="page-title arena-title"><div><span className="eyebrow">BRAWLER COLLECTION · COSMIC ARENA</span><h1>브롤러 아레나</h1><p>나만의 브롤러를 살펴보고, 아레나 활동을 준비해요.</p></div><div className="arena-wallet"><span><Coins size={16} /> {user.coins.toLocaleString()}</span><span><Sparkles size={16} /> {board?.gems ?? 0}</span></div></div>
+    <div className="brawler-tabs"><button className={tab === 'collection' ? 'active' : ''} onClick={() => { if (mode !== 'playing') setTab('collection'); }}>브롤러 선택 {board ? `(${board.owned.length}/${board.brawlers.length})` : ''}</button><button className={tab === 'shop' ? 'active' : ''} onClick={() => { if (mode !== 'playing') { setTab('shop'); void loadArenaShop(); } }}>아레나 상점</button><button className={tab === 'battle' ? 'active' : ''} onClick={() => void showBattle()}>전투 아레나</button>{selectedBrawler && <span>출전 브롤러 <b>{selectedBrawler.image} {selectedBrawler.name}</b></span>}</div>
     {tab === 'collection' && <section className="panel brawler-collection"><div className="panel-heading"><div><span className="eyebrow">STUDY TO UNLOCK</span><h2>나만의 브롤러</h2></div><span className="gem-balance"><Sparkles size={15} /> {board?.gems ?? 0} 보석</span></div>
       {board?.freeBrawlerId && <div className="daily-brawler-banner"><span>오늘의 무료 브롤러 퀴즈</span><b>{weekdayNames[board.weekday]} · {board.brawlers.find(item => item.id === board.freeBrawlerId)?.name}</b><small>통과하면 영구 보유 · 실패해도 오늘 다시 도전할 수 있어요.</small></div>}
-      <div className="brawler-grid">{board?.brawlers.map(brawler => <BrawlerCard key={brawler.id} brawler={brawler} selected={board.selectedBrawlerId === brawler.id} gems={board.gems} busy={quizBusy} onSelect={() => void selectBrawler(brawler)} onChallenge={() => void startChallenge(brawler)} />)}</div>
+      <div className="brawler-filters"><label>등급<select value={rarityFilter} onChange={event => setRarityFilter(event.target.value)}>{['전체', ...rarityOrder].map(rarity => <option key={rarity}>{rarity}</option>)}</select></label><label>보유 상태<select value={ownershipFilter} onChange={event => setOwnershipFilter(event.target.value as typeof ownershipFilter)}><option value="all">전체 브롤러</option><option value="owned">보유 중</option><option value="locked">미보유</option></select></label><label>정렬<select value={sortOrder} onChange={event => setSortOrder(event.target.value as typeof sortOrder)}><option value="rarity">등급 순</option><option value="name">이름 순</option><option value="power">공격력 순</option></select></label></div>
+      <div className="brawler-grid">{visibleBrawlers.map(brawler => <BrawlerCard key={brawler.id} brawler={brawler} selected={board?.selectedBrawlerId === brawler.id} onOpen={() => setDetailBrawler(brawler)} />)}</div>
       <p className="brawler-footnote">첫 탐험가에게 보석 120개를 드려요. 아레나 활동 보상으로 하루 최대 25개를 모을 수 있습니다. 일반·희귀·초희귀·영웅·신화·전설 등급의 브롤러는 능력과 획득 퀴즈가 달라요.</p>
     </section>}
+    {tab === 'shop' && shop && <section className="arena-shop">
+      <section className="arena-shop-feature"><div><span className="eyebrow">TODAY IN THE COSMIC MARKET</span><h2>탐험을 위한 보급 상점</h2><p>활동으로 모은 코인과 보석으로 브롤러를 영입하고 재화를 교환해요.</p></div><div className="arena-shop-wallet"><span><Coins size={16} /> {shop.coins.toLocaleString()} 코인</span><span><Sparkles size={16} /> {shop.gems} 보석</span></div></section>
+      <div className="arena-shop-grid">
+        <article className="arena-offer-card daily-offer"><span className="arena-offer-icon">✦</span><span className="eyebrow">DAILY SUPPLY · 무료</span><h3>오늘의 탐험 보급품</h3><p>하루 한 번 코인 25개와 보석 5개를 받을 수 있어요.</p><button className="primary-button compact" disabled={shopBusy || shop.dailyRewardClaimed} onClick={() => void claimArenaGift()}>{shop.dailyRewardClaimed ? '오늘 수령 완료' : '무료 보상 받기'}</button></article>
+        <article className="arena-offer-card exchange-offer"><span className="arena-offer-icon">⇄</span><span className="eyebrow">DAILY EXCHANGE</span><h3>재화 교환</h3><p>각 교환 방향은 하루 한 번 이용할 수 있어요.</p><div className="exchange-buttons"><button disabled={shopBusy || shop.exchanges.coinsToGems || shop.coins < 100} onClick={() => void exchangeCurrency('coinsToGems')}><Coins size={14} /> 100 → <Sparkles size={14} /> 10</button><button disabled={shopBusy || shop.exchanges.gemsToCoins || shop.gems < 10} onClick={() => void exchangeCurrency('gemsToCoins')}><Sparkles size={14} /> 10 → <Coins size={14} /> 100</button></div></article>
+        <article className="arena-offer-card limited-offer"><span className="limited-ribbon">오늘의 기간 한정</span><span className="limited-avatar">{shop.limitedOffer.brawler.image}</span><span className="eyebrow">{shop.limitedOffer.brawler.rarity} · LIMITED RECRUIT</span><h3>{shop.limitedOffer.brawler.name}</h3><p>{shop.limitedOffer.brawler.attackStyle}</p><div className="limited-price"><del>💎 {shop.limitedOffer.brawler.price}</del><b>💎 {shop.limitedOffer.price}</b></div><button className="primary-button compact" disabled={shopBusy || shop.limitedOffer.brawler.owned || shop.gems < shop.limitedOffer.price} onClick={() => void buyBrawler(shop.limitedOffer.brawler, true)}>{shop.limitedOffer.brawler.owned ? '이미 보유 중' : shop.gems < shop.limitedOffer.price ? '보석 부족' : '한정 영입'}</button></article>
+      </div>
+      <section className="panel arena-shop-brawlers"><div className="panel-heading"><div><span className="eyebrow">BRAWLER RECRUITMENT</span><h2>보석으로 영입</h2></div><span className="gem-balance"><Sparkles size={15} /> {shop.gems} 보석</span></div><div className="arena-product-grid">{board?.brawlers.filter(brawler => !brawler.owned && brawler.price > 0).map(brawler => <article className={`arena-product rarity-${brawler.rarity}`} key={brawler.id}><span className="arena-product-avatar">{brawler.image}</span><div><b>{brawler.name}</b><small>{brawler.rarity} · {brawler.attackStyle}</small></div><button disabled={shopBusy || shop.gems < brawler.price} onClick={() => void buyBrawler(brawler)}>{shop.gems < brawler.price ? '보석 부족' : <><Sparkles size={13} /> {brawler.price}</>}</button></article>)}</div><p className="brawler-footnote">브롤러를 바로 영입하거나, 수집 화면에서 학습 퀴즈에 도전해 획득할 수도 있어요. 유료 결제는 연결되어 있지 않으며 재화는 게임 활동으로 획득합니다.</p></section>
+    </section>}
     {tab === 'battle' && <section className="game-shell brawler-battle-shell">
-      <div className="battle-hud"><div className="battle-player-tag"><span>{selectedBrawler?.image ?? '🐰'}</span><div><b>{selectedBrawler?.name ?? '모모'}</b><small>{selectedBrawler?.attackStyle}</small></div></div><div className="battle-meter"><Heart size={15} /><div><span>HP {Math.ceil(hud.hp)} / {hud.maxHp}</span><i><b style={{ width: `${Math.min(100, hud.hp / hud.maxHp * 100)}%` }} /></i></div></div><div className="battle-meter energy"><Zap size={15} /><div><span>특수 에너지 {Math.floor(hud.energy)}%</span><i><b style={{ width: `${hud.energy}%` }} /></i></div></div><span className="battle-stat"><Target size={14} /> WAVE {hud.wave}</span><span className="battle-stat"><Trophy size={14} /> {hud.score.toLocaleString()}</span>{mode === 'playing' && <button className="battle-end-button" onClick={() => finishGame()}>전투 종료</button>}</div>
+      <div className="battle-hud"><div className="battle-player-tag"><span>{selectedBrawler?.image ?? '🐰'}</span><div><b>{selectedBrawler?.name ?? '모모'}</b><small>{selectedBrawler?.attackStyle}</small></div></div><div className="battle-meter"><Heart size={15} /><div><span>HP {Math.ceil(hud.hp)} / {hud.maxHp}</span><i><b style={{ width: `${Math.min(100, hud.hp / hud.maxHp * 100)}%` }} /></i></div></div><div className="battle-meter energy"><Zap size={15} /><div><span>특수 에너지 {Math.floor(hud.energy)}%</span><i><b style={{ width: `${hud.energy}%` }} /></i></div></div><span className="battle-stat"><Target size={14} /> 피해 {hud.attack}</span><span className="battle-stat"><Trophy size={14} /> WAVE {hud.wave}/5 · {hud.score.toLocaleString()}</span>{mode === 'playing' && <button className="battle-end-button" onClick={() => finishGame()}>전투 종료</button>}</div>
       <div className="game-canvas-wrap battle-canvas-wrap"><canvas ref={canvasRef} className="game-canvas battle-canvas" onPointerDown={onCanvasDown} onPointerMove={onCanvasMove} onPointerUp={onCanvasUp} onPointerCancel={onCanvasUp} aria-label="탑다운 브롤러 아레나" />
-        {mode !== 'playing' && <div className="game-overlay battle-overlay"><div className="game-overlay-card battle-overlay-card"><span className="game-logo">{selectedBrawler?.image ?? '🐰'}</span><span className="eyebrow">{mode === 'over' ? 'ARENA COMPLETE' : 'READY, BRAWLER?'}</span><h2>{mode === 'over' ? '다시 출전할까요?' : '우주 탐험 아레나'}</h2><p>{selectedBrawler?.specialName ?? '새싹 보호막'} · {selectedBrawler?.special ?? '가까운 적을 밀어내요.'}<br />WASD와 방향 조작으로 움직이고, 클릭해 기본 능력을 사용하세요.</p><button className="primary-button" onClick={() => void startGame()}>{mode === 'over' ? '다시 출전' : '전투 시작'} <ArrowRight size={16} /></button>{gameError && <p className="inline-error">{gameError}</p>}</div></div>}
+        {mode !== 'playing' && <div className="game-overlay battle-overlay"><div className="game-overlay-card battle-overlay-card"><span className="game-logo">{selectedBrawler?.image ?? '🐰'}</span><span className="eyebrow">{mode === 'over' ? gameResult === 'victory' ? 'ARENA VICTORY' : gameResult === 'defeat' ? 'ARENA DEFEAT' : 'BATTLE ENDED' : 'READY, BRAWLER?'}</span><h2>{mode === 'over' ? gameResult === 'victory' ? '5 웨이브 생존 성공!' : gameResult === 'defeat' ? '체력이 모두 소진됐어요' : '전투를 종료했어요' : '우주 탐험 아레나'}</h2><p>{selectedBrawler?.specialName ?? '새싹 보호막'} · {selectedBrawler?.special ?? '가까운 적을 밀어내요.'}<br />5 웨이브 동안 생존하면 승리해요. 적의 체력과 피해량은 전투 화면에 표시돼요.<br />WASD와 방향 조작으로 움직이고, 클릭해 기본 능력을 사용하세요.</p><button className="primary-button" onClick={() => void startGame()}>{mode === 'over' ? '다시 출전' : '전투 시작'} <ArrowRight size={16} /></button>{gameError && <p className="inline-error">{gameError}</p>}</div></div>}
         {mode === 'playing' && isTouch && <div className="touch-controls battle-controls" aria-label="전투 터치 조작"><div className={`virtual-stick move-stick ${Math.hypot(controlsHud.moveX, controlsHud.moveY) > .05 ? 'active' : ''}`}><span style={{ transform: `translate(${controlsHud.moveX * 25}px, ${controlsHud.moveY * 25}px)` }} /><small>이동</small></div><div className={`virtual-stick aim-stick ${Math.hypot(controlsHud.aimX, controlsHud.aimY) > .05 ? 'active' : ''}`}><span style={{ transform: `translate(${controlsHud.aimX * 25}px, ${controlsHud.aimY * 25}px)` }} /><small>조준</small></div><button className="battle-action basic-action" onPointerDown={event => { event.preventDefault(); controls.current.firing = true; }} onPointerUp={event => { event.preventDefault(); controls.current.firing = false; }} onPointerCancel={() => { controls.current.firing = false; }}><Crosshair size={19} /><small>기본 능력</small></button><button className="battle-action special-action" onClick={() => useAbility('special')} disabled={hud.energy < 45 || hud.specialCooldown > 0}><Sparkles size={19} /><small>{hud.specialCooldown > 0 ? `${hud.specialCooldown.toFixed(1)}초` : '특수 능력 · Q'}</small></button></div>}
       </div>
       <div className="game-footer battle-footer"><span><i className="legend-dot" /> 탐험 몬스터 <i className="legend-dot cyan" /> 회복·성장 아이템</span><span>{isTouch ? '이동·조준 조이스틱 · 기본 능력 · 특수 능력' : 'WASD 이동 · 마우스 조준/클릭 공격 · Space 연속 공격 · Q 특수 능력'}</span></div>
     </section>}
-    {tab === 'battle' && selectedBrawler && <section className="panel battle-skill-card"><div className="skill-avatar">{selectedBrawler.image}</div><div><span className="eyebrow">ACTIVE BRAWLER · {selectedBrawler.rarity}</span><h2>{selectedBrawler.specialName}</h2><p>{selectedBrawler.special} 기본 공격: {selectedBrawler.attackStyle} · 공격 {selectedBrawler.attack} · 속도 {selectedBrawler.speed}</p></div></section>}
+    {tab === 'battle' && selectedBrawler && <section className="panel battle-skill-card"><div className="skill-avatar">{selectedBrawler.image}</div><div><span className="eyebrow">ACTIVE BRAWLER · {selectedBrawler.rarity}</span><h2>{selectedBrawler.specialName}</h2><p>{selectedBrawler.special} 기본 공격: {selectedBrawler.attackStyle} · 공격 {hud.attack} · 속도 {selectedBrawler.speed}</p></div></section>}
+    {detail && <div className="brawler-detail-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setDetailBrawler(null); }}><section className={`brawler-detail-card rarity-${detail.rarity}`} role="dialog" aria-modal="true" aria-label={`${detail.name} 상세 정보`}><button className="quiz-close" aria-label="상세 정보 닫기" onClick={() => setDetailBrawler(null)}>×</button><div className="brawler-detail-art"><span>{detail.image}</span><i>{detail.owned ? detail.id === board?.selectedBrawlerId ? '현재 출전 중' : '보유 브롤러' : '잠금 상태'}</i></div><span className="eyebrow" style={{ color: rarityTone[detail.rarity] }}>{detail.rarity} · {detail.freeToday ? '오늘 무료 퀴즈' : '우주 탐험가'}</span><h2>{detail.name}</h2><p className="brawler-detail-style">{detail.attackStyle}</p><div className="brawler-stat-grid"><span><small>체력</small><b><Heart size={14} /> {detail.hp}</b></span><span><small>공격력</small><b><Target size={14} /> {detail.attack}</b></span><span><small>이동 속도</small><b><Zap size={14} /> {detail.speed}</b></span></div><div className="brawler-ability-copy"><b>일반 능력</b><p>{detail.attackStyle} 방식으로 아레나를 탐험해요.</p><b>{detail.specialName}</b><p>{detail.special}</p></div><div className="brawler-detail-actions">{detail.owned ? <button className="primary-button wide" disabled={detail.id === board?.selectedBrawlerId} onClick={() => void selectBrawler(detail)}>{detail.id === board?.selectedBrawlerId ? '현재 출전 브롤러' : '이 브롤러 선택'}</button> : <><button className="brawler-challenge-button" disabled={quizBusy || (!detail.freeToday && (board?.gems ?? 0) < detail.price)} onClick={() => void startChallenge(detail)}>{detail.freeToday ? '무료 학습 퀴즈 도전' : `학습 퀴즈 도전 · 💎 ${detail.price}`}</button>{detail.price > 0 && <button className="primary-button wide" disabled={shopBusy || (board?.gems ?? 0) < detail.price} onClick={() => void buyBrawler(detail)}>{(board?.gems ?? 0) < detail.price ? '보석이 부족해요' : `보석 ${detail.price}개로 잠금 해제`}</button>}</>}</div>{error && <p className="inline-error">{error}</p>}</section></div>}
     {quiz && <BrawlerQuizModal quiz={quiz} question={currentQuestion} questionIndex={quizIndex} feedback={quizFeedback} busy={quizBusy} error={error} onAnswer={index => void answerQuestion(index)} onNext={() => { setQuizIndex(index => index + 1); setQuizFeedback(null); }} onClose={() => { setQuiz(null); setQuizFeedback(null); setError(''); }} />}
     {message && !quiz && <div className="brawler-toast"><Sparkles size={15} />{message}<button onClick={() => setMessage('')} aria-label="알림 닫기">×</button></div>}
     {error && !quiz && <p className="inline-error">{error}<button onClick={() => setError('')} aria-label="오류 닫기">×</button></p>}
@@ -938,7 +1031,7 @@ function ShopPage({ user, refreshUser, notify }: { user: User; refreshUser: () =
       </article>;
     })}</div>
     <section className="panel inventory-panel"><div className="panel-heading"><div><span className="eyebrow">YOUR LOADOUT</span><h2>내 인벤토리</h2></div><ShoppingBag size={18} className="muted-icon" /></div><div className="inventory-row">{inventory.length ? inventory.map(item => <span className="inventory-chip" key={item.itemId}><Check size={14} />{items.find(entry => entry.id === item.itemId)?.name ?? item.itemId}<small>×{item.quantity}</small>{item.equipped ? <b>장착 중</b> : null}</span>) : <p className="empty-note">아직 보유한 아이템이 없어요. 코스믹 아레나 보상으로 코인을 모아보세요.</p>}</div></section>
-    <section className="panel inventory-panel"><div className="panel-heading"><div><span className="eyebrow">PURCHASE LOG</span><h2>최근 구매 내역</h2></div><Clock3 size={18} className="muted-icon" /></div>{purchases.length ? <div className="purchase-list">{purchases.map((purchase, index) => <div className="purchase-row" key={`${purchase.purchasedAt}-${index}`}><span>{items.find(item => item.id === purchase.itemId)?.name ?? purchase.itemId}</span><small>{new Date(purchase.purchasedAt).toLocaleString('ko-KR')}</small><b><Coins size={13} /> {purchase.price}</b></div>)}</div> : <p className="empty-note">구매한 아이템이 여기에 기록됩니다.</p>}</section>
+    <section className="panel inventory-panel"><div className="panel-heading"><div><span className="eyebrow">PURCHASE LOG</span><h2>최근 구매 내역</h2></div><Clock3 size={18} className="muted-icon" /></div>{purchases.length ? <div className="purchase-list">{purchases.map((purchase, index) => <div className="purchase-row" key={`${purchase.purchasedAt}-${index}`}><span>{purchase.itemName}</span><small>{new Date(purchase.purchasedAt).toLocaleString('ko-KR')}</small><b>{purchase.currency === 'gems' ? <Sparkles size={13} /> : <Coins size={13} />} {purchase.price} {purchase.currency === 'gems' ? '보석' : '코인'}</b></div>)}</div> : <p className="empty-note">구매한 아이템이 여기에 기록됩니다.</p>}</section>
     {error && <p className="inline-error">{error}</p>}
   </div>;
 }
@@ -1027,7 +1120,7 @@ export default function App() {
         {page === 'study' && <StudyPlanner refreshUser={refreshUser} notify={notify} />}
         {page === 'quiz' && <QuizPage refreshUser={refreshUser} notify={notify} />}
         {page === 'friends' && <FriendsPage user={user} socket={socket} notify={notify} />}
-        {page === 'arena' && <ArenaGame refreshUser={refreshUser} notify={notify} />}
+        {page === 'arena' && <ArenaGame user={user} refreshUser={refreshUser} notify={notify} />}
         {page === 'shop' && <ShopPage user={user} refreshUser={refreshUser} notify={notify} />}
         {page === 'profile' && <ProfilePage user={user} onUpdate={setUser} onLogout={() => void logout()} notify={notify} />}
         <footer className="app-footer"><span>STUDYVERSE PRO</span><span>배움과 모험이 만나는 우주 <i>✦</i></span></footer>

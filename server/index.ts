@@ -94,7 +94,7 @@ db.run(`
   );
   CREATE TABLE IF NOT EXISTS purchase_history (
     id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), item_id TEXT NOT NULL,
-    price INTEGER NOT NULL, purchased_at TEXT NOT NULL
+    price INTEGER NOT NULL, currency TEXT NOT NULL DEFAULT 'coins', purchased_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS game_runs (
     id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
@@ -154,7 +154,13 @@ db.run(`
     (SELECT COUNT(*) FROM users AS matching
      WHERE lower(trim(matching.nickname)) = lower(trim(users.nickname))) = 1
 `);
-if (authSchemaChanged || db.getRowsModified() > 0) persist();
+const purchaseColumns = rows<{ name: string }>('PRAGMA table_info(purchase_history)');
+let purchaseSchemaChanged = false;
+if (!purchaseColumns.some(column => column.name === 'currency')) {
+  db.run("ALTER TABLE purchase_history ADD COLUMN currency TEXT NOT NULL DEFAULT 'coins'");
+  purchaseSchemaChanged = true;
+}
+if (authSchemaChanged || purchaseSchemaChanged || db.getRowsModified() > 0) persist();
 function now() {
   return new Date().toISOString();
 }
@@ -640,10 +646,20 @@ const shop = [
   { id: 'ion-boots', name: '이온 부츠', category: 'ability', description: '이동 속도 +5%', price: 140, max: 5 }
 ];
 app.get('/api/shop', auth, (req: SessionRequest, res) => {
+  const purchases = rows<{ itemId: string; price: number; currency: 'coins' | 'gems'; purchasedAt: string }>(
+    'SELECT item_id AS itemId, price, currency, purchased_at AS purchasedAt FROM purchase_history WHERE user_id = ? ORDER BY purchased_at DESC LIMIT 10',
+    [req.userId]
+  ).map(purchase => ({
+    ...purchase,
+    itemName: shop.find(item => item.id === purchase.itemId)?.name
+      ?? (purchase.itemId.startsWith('brawler:')
+        ? `${brawlers.find(item => item.id === purchase.itemId.slice('brawler:'.length))?.name ?? '알 수 없는'} 브롤러`
+        : purchase.itemId)
+  }));
   res.json({
     items: shop,
     inventory: rows('SELECT item_id AS itemId, quantity, equipped FROM inventory WHERE user_id = ?', [req.userId]),
-    purchases: rows('SELECT item_id AS itemId, price, purchased_at AS purchasedAt FROM purchase_history WHERE user_id = ? ORDER BY purchased_at DESC LIMIT 10', [req.userId])
+    purchases
   });
 });
 app.post('/api/shop/buy', auth, (req: SessionRequest, res) => {
@@ -723,6 +739,13 @@ const seoulWeekday = () => {
   const day = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Seoul', weekday: 'short' }).format(new Date());
   return ({ Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 } as const)[day as 'Sun' | 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri' | 'Sat'];
 };
+const seoulDate = () => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(new Date());
+  const value = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
+};
 function ensureBrawlerProfile(userId: string) {
   if (row('SELECT 1 FROM game_runs WHERE id = ?', [brawlerWalletId(userId)])) return false;
   transaction(() => {
@@ -756,6 +779,108 @@ app.get('/api/game/brawlers', auth, (req: SessionRequest, res) => {
     owned,
     brawlers: brawlers.map(({ difficulty: _difficulty, ...brawler }) => ({ ...brawler, freeToday: brawler.freeDay === today, owned: owned.includes(brawler.id) }))
   });
+});
+function arenaLimitedOffer() {
+  const weekday = seoulWeekday();
+  const brawler = brawlers[(weekday + 1) % brawlers.length];
+  return { brawlerId: brawler.id, price: Math.max(10, Math.floor(brawler.price * 0.75)) };
+}
+app.get('/api/game/shop', auth, (req: SessionRequest, res) => {
+  const userId = req.userId!;
+  ensureBrawlerProfile(userId);
+  const day = seoulDate();
+  const wallet = row<{ score: number }>(
+    'SELECT score FROM game_runs WHERE id = ? AND user_id = ? AND reward_coins = -1',
+    [brawlerWalletId(userId), userId]
+  );
+  const coins = row<{ coins: number }>('SELECT coins FROM users WHERE id = ?', [userId])?.coins ?? 0;
+  const offer = arenaLimitedOffer();
+  res.json({
+    coins,
+    gems: wallet?.score ?? 0,
+    dailyRewardClaimed: Boolean(row('SELECT 1 FROM daily_missions WHERE user_id = ? AND day = ? AND mission_id = ?', [userId, day, 'arena-free-gift'])),
+    exchanges: {
+      coinsToGems: Boolean(row('SELECT 1 FROM daily_missions WHERE user_id = ? AND day = ? AND mission_id = ?', [userId, day, 'arena-exchange-cg'])),
+      gemsToCoins: Boolean(row('SELECT 1 FROM daily_missions WHERE user_id = ? AND day = ? AND mission_id = ?', [userId, day, 'arena-exchange-gc']))
+    },
+    limitedOffer: {
+      ...offer,
+      brawler: (() => {
+        const { difficulty: _difficulty, ...brawler } = brawlers.find(item => item.id === offer.brawlerId)!;
+        const owned = Boolean(row('SELECT 1 FROM game_runs WHERE id = ? AND user_id = ? AND reward_coins = -1', [brawlerOwnedId(userId, brawler.id), userId]));
+        return { ...brawler, owned, freeToday: brawler.freeDay === seoulWeekday() };
+      })()
+    }
+  });
+});
+app.post('/api/game/shop/claim', auth, (req: SessionRequest, res) => {
+  const userId = req.userId!;
+  ensureBrawlerProfile(userId);
+  const day = seoulDate();
+  const result = transaction(() => {
+    if (row('SELECT 1 FROM daily_missions WHERE user_id = ? AND day = ? AND mission_id = ?', [userId, day, 'arena-free-gift'])) return false;
+    run('INSERT INTO daily_missions (user_id, day, mission_id, claimed_at) VALUES (?, ?, ?, ?)', [userId, day, 'arena-free-gift', now()]);
+    run('UPDATE users SET coins = coins + 25 WHERE id = ?', [userId]);
+    run('UPDATE game_runs SET score = score + 5 WHERE id = ? AND user_id = ? AND reward_coins = -1', [brawlerWalletId(userId), userId]);
+    return true;
+  });
+  if (!result) return res.status(409).json({ error: '오늘의 무료 보상은 이미 받았습니다.' });
+  persist();
+  res.json({ ok: true, coins: row<{ coins: number }>('SELECT coins FROM users WHERE id = ?', [userId])?.coins ?? 0,
+    gems: row<{ score: number }>('SELECT score FROM game_runs WHERE id = ? AND user_id = ?', [brawlerWalletId(userId), userId])?.score ?? 0 });
+});
+app.post('/api/game/shop/exchange', auth, (req: SessionRequest, res) => {
+  const parsed = z.object({ direction: z.enum(['coinsToGems', 'gemsToCoins']) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: '교환할 재화를 확인해 주세요.' });
+  const userId = req.userId!;
+  ensureBrawlerProfile(userId);
+  const day = seoulDate();
+  const coinsToGems = parsed.data.direction === 'coinsToGems';
+  const missionId = coinsToGems ? 'arena-exchange-cg' : 'arena-exchange-gc';
+  const result = transaction(() => {
+    if (row('SELECT 1 FROM daily_missions WHERE user_id = ? AND day = ? AND mission_id = ?', [userId, day, missionId])) return 'used';
+    const coins = row<{ coins: number }>('SELECT coins FROM users WHERE id = ?', [userId])?.coins ?? 0;
+    const gems = row<{ score: number }>('SELECT score FROM game_runs WHERE id = ? AND user_id = ? AND reward_coins = -1', [brawlerWalletId(userId), userId])?.score ?? 0;
+    if (coinsToGems ? coins < 100 : gems < 10) return 'funds';
+    if (coinsToGems) {
+      run('UPDATE users SET coins = coins - 100 WHERE id = ? AND coins >= 100', [userId]);
+      run('UPDATE game_runs SET score = score + 10 WHERE id = ? AND user_id = ? AND reward_coins = -1', [brawlerWalletId(userId), userId]);
+    } else {
+      run('UPDATE game_runs SET score = score - 10 WHERE id = ? AND user_id = ? AND score >= 10 AND reward_coins = -1', [brawlerWalletId(userId), userId]);
+      run('UPDATE users SET coins = coins + 100 WHERE id = ?', [userId]);
+    }
+    run('INSERT INTO daily_missions (user_id, day, mission_id, claimed_at) VALUES (?, ?, ?, ?)', [userId, day, missionId, now()]);
+    return 'ok';
+  });
+  if (result === 'used') return res.status(409).json({ error: '오늘 이 방향의 교환은 이미 이용했습니다.' });
+  if (result === 'funds') return res.status(400).json({ error: coinsToGems ? '코인이 부족합니다.' : '보석이 부족합니다.' });
+  persist();
+  res.json({ ok: true, coins: row<{ coins: number }>('SELECT coins FROM users WHERE id = ?', [userId])?.coins ?? 0,
+    gems: row<{ score: number }>('SELECT score FROM game_runs WHERE id = ? AND user_id = ?', [brawlerWalletId(userId), userId])?.score ?? 0 });
+});
+app.post('/api/game/shop/buy-brawler', auth, (req: SessionRequest, res) => {
+  const parsed = z.object({ brawlerId: z.string().min(1).max(40), limited: z.boolean().optional() }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: '구매할 브롤러를 확인해 주세요.' });
+  const brawler = brawlers.find(item => item.id === parsed.data.brawlerId);
+  if (!brawler || !brawler.price) return res.status(404).json({ error: '보석으로 구매할 수 있는 브롤러가 아닙니다.' });
+  const userId = req.userId!;
+  ensureBrawlerProfile(userId);
+  const limitedOffer = arenaLimitedOffer();
+  if (parsed.data.limited && limitedOffer.brawlerId !== brawler.id) return res.status(409).json({ error: '기간 한정 상품이 갱신되었습니다. 상점을 새로고침해 주세요.' });
+  const price = parsed.data.limited ? limitedOffer.price : brawler.price;
+  const result = transaction(() => {
+    if (row('SELECT 1 FROM game_runs WHERE id = ? AND user_id = ? AND reward_coins = -1', [brawlerOwnedId(userId, brawler.id), userId])) return 'owned';
+    const wallet = row<{ score: number }>('SELECT score FROM game_runs WHERE id = ? AND user_id = ? AND reward_coins = -1', [brawlerWalletId(userId), userId]);
+    if (!wallet || wallet.score < price) return 'funds';
+    run('UPDATE game_runs SET score = score - ? WHERE id = ? AND user_id = ? AND score >= ? AND reward_coins = -1', [price, brawlerWalletId(userId), userId, price]);
+    run('INSERT INTO game_runs (id, user_id, started_at, finished_at, score, reward_coins) VALUES (?, ?, ?, ?, 0, -1)', [brawlerOwnedId(userId, brawler.id), userId, now(), now()]);
+    run('INSERT INTO purchase_history (id, user_id, item_id, price, currency, purchased_at) VALUES (?, ?, ?, ?, ?, ?)', [createId(), userId, `brawler:${brawler.id}`, price, 'gems', now()]);
+    return 'ok';
+  });
+  if (result === 'owned') return res.status(409).json({ error: '이미 보유한 브롤러입니다.' });
+  if (result === 'funds') return res.status(400).json({ error: '보석이 부족합니다.' });
+  persist();
+  res.json({ ok: true, gems: row<{ score: number }>('SELECT score FROM game_runs WHERE id = ? AND user_id = ?', [brawlerWalletId(userId), userId])?.score ?? 0 });
 });
 app.post('/api/game/brawlers/select', auth, (req: SessionRequest, res) => {
   const parsed = z.object({ brawlerId: z.string().min(1).max(40) }).safeParse(req.body);
