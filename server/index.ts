@@ -217,7 +217,7 @@ const onlineUsers = new Set<string>();
 const authAttempts = new Map<string, { count: number; resetAt: number }>();
 function limitAuthAttempts(req: Request, res: Response, next: NextFunction) {
   const key = `${req.ip}:${req.path}`;
-  res.once('finish', () => { if (res.statusCode === 200) authAttempts.delete(key); });
+  res.once('finish', () => { if (res.statusCode === 200 || res.statusCode === 201) authAttempts.delete(key); });
   const timestamp = Date.now();
   const current = authAttempts.get(key);
   if (!current || current.resetAt <= timestamp) {
@@ -229,8 +229,7 @@ function limitAuthAttempts(req: Request, res: Response, next: NextFunction) {
   next();
 }
 const loginSchema = z.object({
-  name: z.string().trim().min(2).max(24),
-  password: z.string().min(10).max(128)
+  name: z.string().trim().min(2).max(24)
 });
 function friendPair(a: string, b: string) {
   return a < b ? [a, b] : [b, a];
@@ -272,24 +271,21 @@ function addXp(userId: string, amount: number) {
 app.get('/api/health', (_req, res) => res.json({ ok: true, storage: 'sqlite' }));
 app.post('/api/auth/login', limitAuthAttempts, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: '이름은 2~24자, 비밀번호는 10~128자로 입력해 주세요.' });
-  const { name, password } = parsed.data;
-  const existing = row<{ id: string; password_hash: string }>(
-    'SELECT id, password_hash FROM users WHERE lower(login_name) = lower(?)',
+  if (!parsed.success) return res.status(400).json({ error: '이름은 2~24자로 입력해 주세요.' });
+  const { name } = parsed.data;
+  const existing = row<{ id: string }>(
+    'SELECT id FROM users WHERE lower(login_name) = lower(?)',
     [name]
   );
   if (existing) {
-    if (!(await bcrypt.compare(password, existing.password_hash))) {
-      return res.status(401).json({ error: '이름 또는 비밀번호가 올바르지 않습니다.' });
-    }
     issueCookie(res, existing.id);
     return res.json({ user: userView(row('SELECT * FROM users WHERE id = ?', [existing.id])!) });
   }
 
-  const passwordHash = await bcrypt.hash(password, 12);
+  const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('base64url'), 12);
   const result = transaction(() => {
-    const concurrentUser = row<{ id: string; password_hash: string }>(
-      'SELECT id, password_hash FROM users WHERE lower(login_name) = lower(?)',
+    const concurrentUser = row<{ id: string }>(
+      'SELECT id FROM users WHERE lower(login_name) = lower(?)',
       [name]
     );
     if (concurrentUser) return { kind: 'existing' as const, user: concurrentUser };
@@ -310,15 +306,12 @@ app.post('/api/auth/login', limitAuthAttempts, async (req, res) => {
     );
     return {
       kind: 'created' as const,
-      user: row<{ id: string; password_hash: string }>('SELECT id, password_hash FROM users WHERE id = ?', [id])!
+      user: row<{ id: string }>('SELECT id FROM users WHERE id = ?', [id])!
     };
   });
 
   if (result.kind === 'legacy') {
     return res.status(409).json({ error: '이 이름은 기존 계정과 겹쳐 새 계정으로 사용할 수 없습니다.' });
-  }
-  if (result.kind === 'existing' && !(await bcrypt.compare(password, result.user.password_hash))) {
-    return res.status(401).json({ error: '이름 또는 비밀번호가 올바르지 않습니다.' });
   }
   if (result.kind === 'created') persist();
   issueCookie(res, result.user.id);

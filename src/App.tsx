@@ -100,14 +100,13 @@ function AuthScreen({ onLogin }: { onLogin: (user: User) => void }) {
     <div className="auth-orbit orbit-one" /><div className="auth-orbit orbit-two" />
     <div className="auth-card">
       <a className="brand auth-brand" href="#"><span className="brand-mark"><Sparkles size={20} /></span><span>STUDYVERSE<small>PRO</small></span></a>
-      <div className="auth-intro"><span className="eyebrow">YOUR UNIVERSE, YOUR PACE</span><h1>이름과 비밀번호로<br /><span>간편하게 시작해요.</span></h1><p>처음 입력한 이름이면 계정이 자동으로 만들어져요.</p></div>
+      <div className="auth-intro"><span className="eyebrow">YOUR UNIVERSE, YOUR PACE</span><h1>이름만 입력하고<br /><span>바로 시작해요.</span></h1><p>처음 입력한 이름이면 계정이 자동으로 만들어져요.</p></div>
       <form className="auth-form" onSubmit={submit}>
         <label>이름<input name="name" autoComplete="username" placeholder="사용할 이름" required minLength={2} maxLength={24} /></label>
-        <label>비밀번호<input name="password" type="password" autoComplete="current-password" placeholder="10자 이상 입력" required minLength={10} maxLength={128} /></label>
         {error && <p className="form-error">{error}</p>}
-        <button className="primary-button wide" disabled={busy}>{busy ? '잠시만요…' : '로그인 · 자동 가입'}<ArrowRight size={17} /></button>
+        <button className="primary-button wide" disabled={busy}>{busy ? '잠시만요…' : '이름으로 시작하기'}<ArrowRight size={17} /></button>
       </form>
-      <div className="auth-security"><Shield size={14} /> 비밀번호는 암호화되어 안전하게 저장됩니다.</div>
+      <div className="auth-security"><Shield size={14} /> 같은 이름을 입력하면 해당 계정으로 바로 접속됩니다.</div>
     </div>
   </main>;
 }
